@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import AsyncMock, patch
+from uuid import UUID
 
 import main
 
@@ -10,7 +11,7 @@ class BackendStateTests(unittest.IsolatedAsyncioTestCase):
             main._active_session = None
             main._recent_events.clear()
 
-    @patch.object(main, "_evaluation_coordinator", new_callable=AsyncMock)
+    @patch.object(main, "_activity_coordinator", new_callable=AsyncMock)
     @patch("builtins.print")
     async def test_session_and_activity_timeline(self, _mock_print, coordinator):
         session = await main.start_session(
@@ -32,9 +33,15 @@ class BackendStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(recent["events"]), 1)
         self.assertEqual(recent["events"][0]["event_type"], "activity_start")
         self.assertEqual(recent["events"][0]["sessionId"], session["session"]["id"])
+        event_id = recent["events"][0]["eventId"]
+        UUID(event_id)
+        self.assertEqual(
+            coordinator.handle_event.await_args.args[0]["eventId"],
+            event_id,
+        )
         coordinator.handle_event.assert_awaited_once()
 
-    @patch.object(main, "_evaluation_coordinator", new_callable=AsyncMock)
+    @patch.object(main, "_activity_coordinator", new_callable=AsyncMock)
     @patch("builtins.print")
     async def test_activity_timeline_is_bounded(self, _mock_print, _coordinator):
         for index in range(main.MAX_RECENT_EVENTS + 1):

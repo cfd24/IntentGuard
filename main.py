@@ -8,9 +8,8 @@ from uuid import uuid4
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from actor.notifications import send_nudge
-from brain.evaluator import evaluate_activity
-from evaluation_scheduler import ActivityEvaluationCoordinator
+from activity_scheduler import ActivityDispatchCoordinator
+from go_dispatcher import dispatch_activity_to_go
 
 
 app = FastAPI(title="IntentGuard", version="0.1.0")
@@ -19,9 +18,8 @@ MAX_RECENT_EVENTS = 250
 _state_lock = Lock()
 _active_session: dict | None = None
 _recent_events: deque[dict] = deque(maxlen=MAX_RECENT_EVENTS)
-_evaluation_coordinator = ActivityEvaluationCoordinator(
-    evaluator=evaluate_activity,
-    notifier=send_nudge,
+_activity_coordinator = ActivityDispatchCoordinator(
+    dispatcher=dispatch_activity_to_go,
     delay_seconds=float(os.environ.get("INTENTGUARD_EVALUATION_DELAY_SECONDS", "8")),
 )
 
@@ -76,7 +74,7 @@ async def start_session(request: SessionStart) -> dict:
         _active_session = session
         _recent_events.clear()
 
-    await _evaluation_coordinator.reset()
+    await _activity_coordinator.reset()
 
     print(f"[SESSION] {session['goal']}", flush=True)
     return {"session": session}
@@ -92,6 +90,8 @@ def get_session() -> dict:
 @app.post("/activity")
 async def record_activity(event: ActivityEvent) -> dict:
     stored_event = event.model_dump()
+    if event.event_type == "activity_start":
+        stored_event["eventId"] = str(uuid4())
 
     with _state_lock:
         session_id = _active_session["id"] if _active_session else None
@@ -107,14 +107,14 @@ async def record_activity(event: ActivityEvent) -> dict:
         print(f"[END]   {event.domain or '-'} | {duration}s | {event.title}", flush=True)
 
     try:
-        await _evaluation_coordinator.handle_event(
+        await _activity_coordinator.handle_event(
             stored_event,
             session,
             recent_context,
         )
     except Exception as error:
-        # Activity recording must remain available even if evaluation scheduling fails.
-        print(f"[EVAL] ERROR | scheduler failed: {error}", flush=True)
+        # Activity recording must remain available even if dispatch scheduling fails.
+        print(f"[GO] ERROR | scheduler failed: {error}", flush=True)
 
     return {"accepted": True}
 
