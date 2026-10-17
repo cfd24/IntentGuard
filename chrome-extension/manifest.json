@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "IntentGuard Observer",
+  "version": "0.1.0",
+  "description": "Observes active browser activity for IntentGuard.",
+  "permissions": [
+    "tabs",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  }
+}
