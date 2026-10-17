@@ -40,9 +40,45 @@ python3 -m json.tool chrome-extension/manifest.json >/dev/null
 
 In `chrome://extensions`, reload IntentGuard Observer once after this extension update so Chrome grants the new localhost host permission. With the backend running and a session active, switch among tabs and confirm START/END logs appear in both the extension service-worker console and backend terminal. Stop the backend, switch tabs, and confirm observation continues with a backend-unavailable warning. Restart the backend and switch tabs again; delivery resumes without another extension reload.
 
+### Semantic evaluation and intervention
+* **Debounce architecture** — Each `activity_start` creates one cancellable evaluation task. It waits 8 seconds by default; an `activity_end`, replacement activity, or new session cancels the pending task. There is no continuous polling.
+* **Decision boundary** — `brain/evaluator.py` sends only the active goal and browser text metadata to Gemini and returns `decision`, `confidence`, and `reason`. Valid decisions are `IGNORE`, `NUDGE`, and `UNCERTAIN`. Low-confidence NUDGE results are downgraded to UNCERTAIN.
+* **Intervention boundary** — `actor/notifications.py` uses `osascript` for one concise macOS notification only after a clear NUDGE. IGNORE and UNCERTAIN never notify, and an unchanged activity cannot notify twice.
+* **Failure behavior** — Provider and notification failures are logged without rejecting activity events or stopping the observer.
+
+Required environment variable:
+```bash
+export GEMINI_API_KEY='your_api_key'
+```
+
+Optional configuration:
+```bash
+export INTENTGUARD_GEMINI_MODEL='gemini-2.5-flash'
+export INTENTGUARD_GEMINI_TIMEOUT_SECONDS=20
+export INTENTGUARD_EVALUATION_DELAY_SECONDS=8
+```
+
+Automated validation:
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m compileall -q main.py brain actor evaluation_scheduler.py tests
+```
+
+The automated suite mocks Gemini and macOS notifications. It verifies short-activity cancellation, replacement cancellation, stale in-flight result suppression, exactly-once evaluation, no-session behavior, all three decisions, low-confidence NUDGE safety, duplicate suppression, provider-failure isolation, session state, and the bounded activity timeline.
+
+### Manual semantic test
+1. Start the backend with `GEMINI_API_KEY` set, start a session with the Math 185 goal, and keep the backend terminal visible.
+2. Open complex-logarithm material for more than 8 seconds. Expect `[EVAL] IGNORE` and no notification.
+3. Open an unrelated page for only 2–5 seconds, then leave. Expect no `[EVAL]` line and no notification.
+4. Open Dodgers/baseball highlights for more than 8 seconds. Expect a high-confidence `[EVAL] NUDGE` and one macOS notification. Remain on the unchanged page and confirm there is no second notification.
+5. Open a page with an ambiguous title for more than 8 seconds. Expect `[EVAL] UNCERTAIN` or conservative IGNORE and no notification.
+6. Stop the backend or temporarily remove the API key. Confirm browser activity continues to appear after recovery; model failures should log `[EVAL] ERROR` rather than break `/activity`.
+
 ### Known limitations and next step
 * Sessions and events are in memory and reset whenever the backend restarts.
 * Events generated while the backend is offline are not queued or replayed.
 * Observation is limited to supported browser URLs; there is no desktop observer in this slice.
-* No semantic classification or intervention is implemented yet.
-* **Next increment:** add a short activity-change debounce/persistence threshold, then evaluate stable activity against the active goal and trigger a local notification.
+* Evaluation is text-only and depends on the quality of page titles and URLs.
+* A navigation cancels stale results and notifications, but an already-started HTTP request may still finish in its worker thread.
+* Evaluation decisions are logged but are not yet included in `/activity/recent` or persisted for review.
+* **Next increment:** add evaluation decisions to the session timeline and a small feedback endpoint for marking helpful nudges and false positives before introducing personalization.

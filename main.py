@@ -1,3 +1,4 @@
+import os
 from collections import deque
 from datetime import datetime, timezone
 from threading import Lock
@@ -7,6 +8,10 @@ from uuid import uuid4
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from actor.notifications import send_nudge
+from brain.evaluator import evaluate_activity
+from evaluation_scheduler import ActivityEvaluationCoordinator
+
 
 app = FastAPI(title="IntentGuard", version="0.1.0")
 
@@ -14,6 +19,11 @@ MAX_RECENT_EVENTS = 250
 _state_lock = Lock()
 _active_session: dict | None = None
 _recent_events: deque[dict] = deque(maxlen=MAX_RECENT_EVENTS)
+_evaluation_coordinator = ActivityEvaluationCoordinator(
+    evaluator=evaluate_activity,
+    notifier=send_nudge,
+    delay_seconds=float(os.environ.get("INTENTGUARD_EVALUATION_DELAY_SECONDS", "8")),
+)
 
 
 def utc_now_iso() -> str:
@@ -54,7 +64,7 @@ def health() -> dict:
 
 
 @app.post("/session/start")
-def start_session(request: SessionStart) -> dict:
+async def start_session(request: SessionStart) -> dict:
     session = {
         "id": str(uuid4()),
         "goal": request.goal,
@@ -65,6 +75,8 @@ def start_session(request: SessionStart) -> dict:
         global _active_session
         _active_session = session
         _recent_events.clear()
+
+    await _evaluation_coordinator.reset()
 
     print(f"[SESSION] {session['goal']}", flush=True)
     return {"session": session}
@@ -78,19 +90,31 @@ def get_session() -> dict:
 
 
 @app.post("/activity")
-def record_activity(event: ActivityEvent) -> dict:
+async def record_activity(event: ActivityEvent) -> dict:
     stored_event = event.model_dump()
 
     with _state_lock:
         session_id = _active_session["id"] if _active_session else None
         stored_event["sessionId"] = session_id
         _recent_events.append(stored_event)
+        session = dict(_active_session) if _active_session else None
+        recent_context = list(_recent_events)[-5:]
 
     if event.event_type == "activity_start":
         print(f"[START] {event.domain or '-'} | {event.title}", flush=True)
     else:
         duration = event.durationSeconds if event.durationSeconds is not None else "?"
         print(f"[END]   {event.domain or '-'} | {duration}s | {event.title}", flush=True)
+
+    try:
+        await _evaluation_coordinator.handle_event(
+            stored_event,
+            session,
+            recent_context,
+        )
+    except Exception as error:
+        # Activity recording must remain available even if evaluation scheduling fails.
+        print(f"[EVAL] ERROR | scheduler failed: {error}", flush=True)
 
     return {"accepted": True}
 
